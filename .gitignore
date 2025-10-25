@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.cache/
+*.pyc
+
+# системные папки
+.idea/
+.vscode/
+.DS_Store
+
+# файлы с секретами
+.env
+.env.*
