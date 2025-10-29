@@ -4,7 +4,7 @@ from pathlib import Path
 from yt_dlp import YoutubeDL
 from .config import MP3_DIR, log
 
-COOKIES_FILE = Path(__file__).parent.parent / "cookies.txt"
+COOKIES_FILE = Path(__file__).parent / "cookies.txt"
 MAX_VIDEO_DURATION = 300  # максимум 5 минут
 
 # === Поиск оригинального или популярного трека ===
@@ -124,12 +124,15 @@ async def download_mp3(video_id: str, artist: str, title: str) -> Path | None:
         log.error(f"[YouTube] ❌ Ошибка загрузки: {e}")
         return None
 def search_youtube_list(query: str, limit: int = 10) -> list[dict]:
-    """Ищет до 10 треков по запросу и возвращает список с title/id."""
+    """Поиск YouTube с приоритетом официальных и лейблов (включая 'Provided to YouTube')."""
+
     ydl_opts = {
         "quiet": True,
-        "extract_flat": "in_playlist",
         "skip_download": True,
+        "noplaylist": True,
+        "extract_flat": True,
         "default_search": "ytsearch20",
+        "force_generic_extractor": True,
     }
 
     if COOKIES_FILE.exists():
@@ -137,19 +140,56 @@ def search_youtube_list(query: str, limit: int = 10) -> list[dict]:
 
     try:
         with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=False)
+            info = ydl.extract_info(f"ytsearch20:{query}", download=False)
     except Exception as e:
         print(f"[YouTube] ❌ Ошибка поиска: {e}")
         return []
 
-    entries = info.get("entries", [])
+    entries = info.get("entries") if isinstance(info, dict) else None
     if not entries:
+        print("[YouTube] ⚠️ Пустые результаты поиска")
         return []
 
-    # Фильтруем короткие и подходящие видео
-    filtered = [
-        v for v in entries
-        if v.get("duration") and v["duration"] <= MAX_VIDEO_DURATION
-    ]
+    results = []
+    for v in entries:
+        if not isinstance(v, dict):
+            continue
 
-    return filtered[:limit]
+        url = v.get("url") or v.get("webpage_url")
+        title = v.get("title", "")
+        duration = v.get("duration") or 0
+        uploader = (v.get("uploader") or "").lower()
+
+        if not url or not title:
+            continue
+        if duration < 30 or duration > MAX_VIDEO_DURATION:
+            continue
+        if "shorts" in url.lower() or "shorts" in title.lower():
+            continue
+
+        # 💿 Расставляем приоритеты
+        priority = 0
+
+        # 1️⃣ Каналы лейблов и дистрибьюторов
+        if any(word in uploader for word in ["vevo", "records", "label", "music", "official"]):
+            priority += 10
+
+        # 2️⃣ Provided to YouTube (Topic-каналы)
+        if " - topic" in uploader:
+            priority += 15  # самый высокий приоритет
+
+        # 3️⃣ Название содержит official audio/video
+        if "official" in title.lower() or "audio" in title.lower():
+            priority += 5
+
+        # 4️⃣ Наоборот — искусственные ремиксы / slowed / sped up — понижаем
+        if any(bad in title.lower() for bad in ["remix", "slowed", "sped up", "nightcore", "8d"]):
+            priority -= 10
+
+        v["_priority"] = priority
+        results.append(v)
+
+    # 📊 Сортировка по приоритету
+    results.sort(key=lambda x: x.get("_priority", 0), reverse=True)
+
+    return results[:limit]

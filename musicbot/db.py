@@ -10,6 +10,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_id TEXT,
             url TEXT,
+            source_url TEXT, 
             audio_hash TEXT,
             artist TEXT,
             title TEXT,
@@ -62,13 +63,13 @@ def get_by_url(url: str):
         return None
     return {"artist": row[0], "title": row[1], "mp3_path": row[2]}
 
-def save_track_url(url: str, ahash: str, artist: str, title: str, mp3_path: str, youtube_id: str):
+def save_track_url(url: str, ahash: str, artist: str, title: str, mp3_path: str, youtube_id: str, source_url: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
-        INSERT OR REPLACE INTO tracks (url, audio_hash, artist, title, mp3_path, youtube_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (url, ahash, artist, title, mp3_path, youtube_id))
+        INSERT OR REPLACE INTO tracks (url, source_url, audio_hash, artist, title, mp3_path, youtube_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (url, source_url, ahash, artist, title, mp3_path, youtube_id))
     conn.commit()
     conn.close()
 def normalize(s: str) -> str:
