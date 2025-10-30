@@ -21,83 +21,108 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = update.message
-    await m.reply_chat_action("typing")
+    video = None
+    snip = None
+    mp3 = None
+    user = m.from_user
+    username = user.username or user.first_name or "Unknown"
 
-    # 1️⃣ Скачиваем и извлекаем звук
-    video = await tg_download_video(update, context)
-    snip = await extract_audio_snip(video)
-    if not snip:
-        await m.reply_text("⚠️ Не удалось извлечь звук из видео.")
-        return
+    try:
+        await m.reply_chat_action("typing")
 
-    # 2️⃣ Проверяем кэш по аудио-хэшу
-    ahash = audio_hash(snip)
-    if cached := get_by_audio_hash(ahash):
-        await m.reply_text(f"⚡ Найдено по звуку: {cached['artist']} — {cached['title']}")
-        # сохраняем в БД как с YouTube-ссылкой, но без file_id
-        youtube_url = f"https://www.youtube.com/watch?v={cached.get('youtube_id', '')}" if cached.get("youtube_id") else ""
+        # 1️⃣ Скачиваем и извлекаем звук
+        video = await tg_download_video(update, context)
+        snip = await extract_audio_snip(video)
+        if not snip:
+            await m.reply_text("⚠️ Не удалось извлечь звук из видео.")
+            return
+
+        # 2️⃣ Проверяем кэш по аудио-хэшу
+        ahash = audio_hash(snip)
+        if cached := get_by_audio_hash(ahash):
+            await m.reply_text(f"⚡ Найдено по звуку: {cached['artist']} — {cached['title']}")
+            youtube_url = (
+                f"https://www.youtube.com/watch?v={cached.get('youtube_id', '')}"
+                if cached.get("youtube_id")
+                else ""
+            )
+            save_track_url(
+                url="",
+                ahash=ahash,
+                artist=cached["artist"],
+                title=cached["title"],
+                mp3_path=cached["mp3_path"],
+                youtube_id=cached.get("youtube_id", ""),
+                source_url=youtube_url,
+            )
+            await m.reply_audio(
+                audio=open(cached["mp3_path"], "rb"),
+                title=cached["title"],  # ← красивое название без [ID]
+                performer=username,
+                thumbnail=open("assets/logo1.jpg", "rb")
+            )
+            return
+
+        # 3️⃣ Распознаём через AUDD
+        await m.reply_text("🎧 Распознаю трек через AUDD...")
+        audd = await audd_recognize(snip)
+        if not audd:
+            await m.reply_text("❌ Не удалось распознать трек.")
+            return
+
+        artist = audd.get("artist", "Unknown")
+        title = audd.get("title", "Unknown")
+        duration = audd.get("timecode", 0) or audd.get("length", 0)
+
+        # 4️⃣ Поиск на YouTube
+        vid = search_youtube_music(title, artist, duration)
+        if not vid:
+            await m.reply_text("⚠️ Не удалось найти трек на YouTube.")
+            return
+
+        # 5️⃣ Скачиваем MP3
+        mp3 = await download_mp3(vid, artist, title)
+        if not mp3:
+            await m.reply_text("⚠️ Ошибка при скачивании MP3.")
+            return
+
+        youtube_url = f"https://www.youtube.com/watch?v={vid}"
+
+        # 6️⃣ Сохраняем результат
         save_track_url(
-            url="",  # ссылки изначально нет
+            url="",
             ahash=ahash,
-            artist=cached["artist"],
-            title=cached["title"],
-            mp3_path=cached["mp3_path"],
-            youtube_id=cached.get("youtube_id", ""),
+            artist=artist,
+            title=title,
+            mp3_path=str(mp3),
+            youtube_id=vid,
             source_url=youtube_url,
         )
-        await m.reply_audio(audio=open(cached["mp3_path"], "rb"))
-        return
 
-    # 3️⃣ Распознаем через AUDD
-    await m.reply_text("🎧 Распознаю трек через AUDD...")
-    audd = await audd_recognize(snip)
-    if not audd:
-        await m.reply_text("❌ Не удалось распознать трек.")
-        return
+        # 7️⃣ Отправляем пользователю
 
-    artist = audd.get("artist", "Unknown")
-    title = audd.get("title", "Unknown")
-    query = f"{artist} {title} official audio"
+        await m.reply_audio(
+            audio=open(mp3, "rb"),
+            title=title,
+            performer=username,
+            thumbnail=open("assets/logo1.jpg", "rb"),
+        )
 
-    # 4️⃣ Поиск на YouTube
-    duration = audd.get("timecode", 0) or audd.get("length", 0)
-    vid = search_youtube_music(title, artist, duration)
-    if not vid:
-        await m.reply_text("⚠️ Не удалось найти трек на YouTube.")
-        return
+    except Exception as e:
+        # централизованная обработка всех неожиданных ошибок
+        from .config import log
+        log.error(f"[handle_video] ❌ Ошибка: {e}", exc_info=True)
+        await m.reply_text("⚠️ Произошла непредвиденная ошибка. Попробуй позже.")
 
-    # 5️⃣ Скачиваем MP3
-    mp3 = await download_mp3(vid, artist, title)
-    if not mp3:
-        await m.reply_text("⚠️ Ошибка при скачивании MP3.")
-        return
-
-    youtube_url = f"https://www.youtube.com/watch?v={vid}"
-
-    # 6️⃣ Сохраняем как в handle_link — но без file_id
-    save_track_url(
-        url="",  # так как исходной ссылки не было
-        ahash=ahash,
-        artist=artist,
-        title=title,
-        mp3_path=str(mp3),
-        youtube_id=vid,
-        source_url=youtube_url,
-    )
-
-    # 7️⃣ Отправляем пользователю
-    await m.reply_text(f"🎶 {artist} — {title}")
-    await m.reply_audio(audio=open(mp3, "rb"))
-
-    # 8️⃣ Очистка временных файлов
-    if video.exists():
-        video.unlink(missing_ok=True)
-    if snip and Path(snip).exists():
-        Path(snip).unlink(missing_ok=True)
+    finally:
+        # 8️⃣ Очистка всех временных файлов
+        cleanup_files(video, snip, mp3)
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = update.message
     url = m.text.strip()
+    user = m.from_user
+    username = user.username or user.first_name or "Unknown"
 
     if not re.match(r'https?://', url):
         return
@@ -107,7 +132,13 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🧠 1️⃣ Проверяем кэш по ссылке
     if cached := get_by_url(url):
         await m.reply_text(f"⚡ Из кэша (по ссылке): {cached['artist']} — {cached['title']}")
-        await m.reply_audio(audio=open(cached["mp3_path"], "rb"))
+        await m.reply_audio(
+            audio=open(cached["mp3_path"], "rb"),
+            title=cached["title"],  # ← красивое название без [ID]
+            performer=username,
+            thumbnail=open("assets/logo1.jpg", "rb")
+        )
+        return
         return
 
     tmp_video = Path("temp_video.mp4")
@@ -133,8 +164,13 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ahash = audio_hash(snip)
         if cached := get_by_audio_hash(ahash):
             await m.reply_text(f"⚡ Найдено по звуку: {cached['artist']} — {cached['title']}")
-            save_track_url(url, ahash, cached["artist"], cached["title"], cached["mp3_path"], "")
-            await m.reply_audio(audio=open(cached["mp3_path"], "rb"))
+            save_track_url(url, ahash, cached["artist"], cached["title"], cached["mp3_path"], "", "")
+            await m.reply_audio(
+                audio=open(cached["mp3_path"], "rb"),
+                title=cached["title"],  # ← красивое название без [ID]
+                performer=username,
+                thumbnail=open("assets/logo1.jpg", "rb")
+            )
             return
 
         # 5️⃣ Распознаём через AUDD
@@ -165,15 +201,15 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 7️⃣ Сохраняем результат и кэшируем ссылку
         save_track_url(url, ahash, artist, title, str(mp3), vid, youtube_url)
         await m.reply_text(f"🎶 {artist} — {title}")
-        await m.reply_audio(audio=open(mp3, "rb"))
+        await m.reply_audio(
+            audio=open(mp3, "rb"),
+            title=title,
+            performer=username,
+            thumbnail=open("assets/logo1.jpg", "rb"),
+        )
 
     finally:
-        # 🧹 Очистка временных файлов
-        if tmp_video.exists():
-            tmp_video.unlink(missing_ok=True)
-        if snip and Path(snip).exists():
-            Path(snip).unlink(missing_ok=True)
-
+        cleanup_files(tmp_video, snip)
 # временное хранилище выбора (user_id -> список треков)
 user_choices = {}
 
@@ -229,10 +265,14 @@ async def delete_message_later(context, chat_id, message_id, user_id):
         pass
 
 async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     data = query.data
+    user = query.from_user
+    username = user.username or user.first_name or "Unknown"
+
 
     if not data.startswith("choose_"):
         return
@@ -280,4 +320,15 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         source_url=youtube_url  # сохраняем только источник
     )
 
-    await query.message.reply_audio(audio=open(mp3, "rb"), caption=f"🎶 {title}")
+    await query.message.reply_audio(
+        audio=open(mp3, "rb"),
+        title=title,  # 🎵 Название трека (в плеере)
+        performer=username,  # 👤 Имя пользователя как “исполнитель”
+        thumbnail=open("assets/logo1.jpg", "rb")
+    )
+
+
+def cleanup_files(*paths: Path):
+    for p in paths:
+        if p and p.exists():
+            p.unlink(missing_ok=True)

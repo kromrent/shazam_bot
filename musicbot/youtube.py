@@ -3,7 +3,8 @@ import re
 from pathlib import Path
 from yt_dlp import YoutubeDL
 from .config import MP3_DIR, log
-
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3, APIC, error
 COOKIES_FILE = Path(__file__).parent / "cookies.txt"
 MAX_VIDEO_DURATION = 300  # максимум 5 минут
 
@@ -85,8 +86,9 @@ def search_youtube_music(title: str, artist: str, duration: int | None = None) -
 
 # === Загрузка mp3 ===
 async def download_mp3(video_id: str, artist: str, title: str) -> Path | None:
-    """Скачивает трек в mp3, ограничивая битрейт и проверяя размер."""
-    safe_title = f"{artist} - {title}".strip().replace("/", "_").replace("\\", "_")
+    """Скачивает трек в mp3, ограничивая битрейт и добавляет обложку."""
+    safe_title = f"{artist} - {title} [{video_id}]".strip()
+    safe_title = re.sub(r'[\\/*?:"<>|]', "_", safe_title)
     dst = MP3_DIR / f"{safe_title}.mp3"
     if dst.exists():
         print(f"[Cache] ⚡ Уже есть: {dst.name}")
@@ -101,7 +103,7 @@ async def download_mp3(video_id: str, artist: str, title: str) -> Path | None:
             "preferredcodec": "mp3",
             "preferredquality": "192",
         }],
-        "postprocessor_args": ["-b:a", "192k"],  # ограничиваем битрейт
+        "postprocessor_args": ["-b:a", "192k"],
     }
 
     loop = asyncio.get_event_loop()
@@ -110,19 +112,46 @@ async def download_mp3(video_id: str, artist: str, title: str) -> Path | None:
             None,
             lambda: YoutubeDL(ydl_opts).download([f"https://www.youtube.com/watch?v={video_id}"])
         )
+
         if dst.exists():
             size_mb = dst.stat().st_size / 1024 / 1024
             if size_mb > 50:
                 print(f"[YouTube] ⚠️ Файл слишком большой ({size_mb:.1f} МБ) — удалён.")
                 dst.unlink(missing_ok=True)
                 return None
+
             print(f"[YouTube] 💾 Скачано: {dst.name} ({size_mb:.1f} МБ)")
+
+            # 🖼️ Добавляем обложку
+            try:
+                cover_path = Path("assets/logo1.jpg")
+                if cover_path.exists():
+                    audio = MP3(dst, ID3=ID3)
+                    try:
+                        audio.add_tags()
+                    except error:
+                        pass
+                    with open(cover_path, "rb") as img:
+                        audio.tags.add(APIC(
+                            encoding=3,
+                            mime="image/jpeg",
+                            type=3,
+                            desc="Cover",
+                            data=img.read()
+                        ))
+                    audio.save(v2_version=3)
+                    print(f"[Tag] 🖼️ Обложка добавлена в {dst.name}")
+            except Exception as e:
+                print(f"[Tag] ❌ Ошибка добавления обложки: {e}")
+
             return dst
+
         print("[YouTube] ⚠️ Файл не найден после загрузки.")
         return None
     except Exception as e:
         log.error(f"[YouTube] ❌ Ошибка загрузки: {e}")
         return None
+
 def search_youtube_list(query: str, limit: int = 10) -> list[dict]:
     """Поиск YouTube с приоритетом официальных и лейблов (включая 'Provided to YouTube')."""
 
